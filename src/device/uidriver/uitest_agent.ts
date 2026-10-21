@@ -19,6 +19,10 @@ import { Hdc, NEWLINE } from '../hdc';
 import { hostUnusedPort } from '../../utils/net_utils';
 
 const RPC_PORT = 8012;
+const AGENT_START_MAX_ATTEMPTS = 10;
+const AGENT_START_RETRY_DELAY_MS = 200;
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export class UitestAgent {
     private device: Device;
@@ -36,12 +40,26 @@ export class UitestAgent {
     }
 
     async start() {
-        if (this.isRunning()) {
-            return;
+        if (!this.isRunning()) {
+            this.installAgentSo();
+            this.hdc.excuteShellCommandSync('/system/bin/uitest start-daemon singleness &');
+
+            let running = false;
+            for (let attempt = 1; attempt <= AGENT_START_MAX_ATTEMPTS; attempt += 1) {
+                if (this.isRunning()) {
+                    running = true;
+                    break;
+                }
+                if (attempt < AGENT_START_MAX_ATTEMPTS) {
+                    await sleep(AGENT_START_RETRY_DELAY_MS);
+                }
+            }
+
+            if (!running) {
+                throw new Error('Unable to start uitest daemon on RPC port ' + RPC_PORT + '.');
+            }
         }
 
-        this.installAgentSo();
-        this.hdc.excuteShellCommandSync('/system/bin/uitest start-daemon singleness &');
         this.hostPort = await hostUnusedPort();
         this.hdc.fportRm(`tcp:${this.hostPort}`, `tcp:${RPC_PORT}`);
         this.hdc.fport(`tcp:${this.hostPort}`, `tcp:${RPC_PORT}`);
@@ -73,13 +91,9 @@ export class UitestAgent {
     }
 
     private isRunning(): boolean {
-        let output = this.hdc.excuteShellCommandSync(`netstat -anp | grep ${RPC_PORT}`);
-        for (let line of output.split(NEWLINE)) {
-            let matches = line.match(/[\S]+/g);
-            if (matches?.length === 5) {
-                return true;
-            }
-        }
-        return false;
+        let output = this.hdc.excuteShellCommandSync('netstat', '-anp');
+        return output.split(NEWLINE).some((line) => {
+            return line.includes(':' + RPC_PORT) && /\bLISTEN\b/.test(line);
+        });
     }
 }

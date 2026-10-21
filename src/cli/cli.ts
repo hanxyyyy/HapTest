@@ -224,9 +224,9 @@ async function runSyncDeviceCommand(options: any): Promise<void> {
             }
         });
 
-    program
+    const hasNamedCommand = process.argv.slice(2).some((argument) => argument === 'multi' || argument === 'sync');
+    const fuzzCommand = program
         .description('HapTest fuzz runner')
-        .option('-i, --hap <items...>', 'HAP bundle name or HAP file path or HAP project source root (can specify multiple)')
         .option('-o --output <dir>', 'output dir', 'out')
         .option('--policy <policyName>', 'policy name', 'manu')
         .option('-t --target [connectkey]', 'hdc connectkey', undefined)
@@ -238,15 +238,23 @@ async function runSyncDeviceCommand(options: any): Promise<void> {
         .option('--exclude [excludes...]', 'exclude bundle name')
         .option('--llm', 'start llm policy', false)
         .option('--simK <number>', '', '8')
-        .option('--staticConfig <file>', 'Path to static configuration file')
-        .action(async (cmdOptions) => {
-            try {
-                await runFuzzCommand(cmdOptions);
-            } catch (err) {
-                logger.error('haptest fuzz command failed.', err);
-                process.exit(1);
-            }
-        });
+        .option('--staticConfig <file>', 'Path to static configuration file');
+
+    if (!hasNamedCommand) {
+        fuzzCommand.option(
+            '-i, --hap <items...>',
+            'HAP bundle name or HAP file path or HAP project source root (can specify multiple)'
+        );
+    }
+
+    fuzzCommand.action(async (cmdOptions) => {
+        try {
+            await runFuzzCommand(cmdOptions);
+        } catch (err) {
+            logger.error('haptest fuzz command failed.', err);
+            process.exit(1);
+        }
+    });
 
     program
         .command('multi')
