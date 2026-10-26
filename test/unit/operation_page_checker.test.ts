@@ -50,6 +50,33 @@ describe('OperationPageChecker', () => {
         expect(result.leftPageSig).not.toBe(result.rightPageSig);
     });
 
+    it('accepts the same logical page when device-specific Abilities load the same route and semantics', () => {
+        const left = createPage({ ability: 'EntryAbility', path: 'pages/MainPage', title: 'Home', action: 'Open' });
+        const right = createPage({ ability: 'PcAbility', path: 'pages/MainPage', title: 'Home', action: 'Open', offset: 400 });
+        const result = new OperationPageChecker({ targetBundleName: targetBundle }).checkRules(left, right);
+        expect(result.decision).toBe('SAME_PAGE');
+        expect(result.rule).toBe('TITLE_MATCH');
+        expect(result.evidence).toContain('left ability=EntryAbility');
+        expect(result.evidence).toContain('right ability=PcAbility');
+    });
+
+    it('uses semantic conflict to detect a fork even when the Abilities differ', () => {
+        const left = createPage({ ability: 'EntryAbility', title: 'Home', action: 'Open' });
+        const right = createPage({ ability: 'PcAbility', title: 'Settings', action: 'Save' });
+        const result = new OperationPageChecker({ targetBundleName: targetBundle }).checkRules(left, right);
+        expect(result.decision).toBe('DIFFERENT_PAGE');
+        expect(result.rule).toBe('TITLE_CONFLICT');
+    });
+
+    it('returns UNCERTAIN when different Abilities have no corroborating page evidence', () => {
+        const left = createPage({ ability: 'EntryAbility', path: 'pages/MainPage', title: '', action: '' });
+        const right = createPage({ ability: 'PcAbility', path: 'pages/MainPage', title: '', action: '' });
+        const result = new OperationPageChecker({ targetBundleName: targetBundle }).checkRules(left, right);
+        expect(result.decision).toBe('UNCERTAIN');
+        expect(result.rule).toBe('ABILITY_MISMATCH');
+        expect(result.unresolvedIssues.join(' ')).toContain('not sufficient by itself');
+    });
+
     it('accepts device-specific component tree changes when semantic anchors match', () => {
         const left = createPage({ title: 'Home', action: 'Open' });
         const right = createPage({ title: 'Home', action: 'Open', extra: true });

@@ -29,6 +29,8 @@ import { Hap } from '../model/hap';
 import { EventAction } from './event_action';
 import { LLMOperationPageJudge, OperationPageDecision } from './llm_operation_page_judge';
 import { OperationPageCheckResult, OperationPageChecker } from './operation_page_checker';
+import { ComponentFilterDiagnostic, ComponentMappingResult, ComponentMappingStatus, ComponentMetadata, ComponentScoreStep, mapClickEvent } from './component_event_mapper';
+import { Point } from '../model/point';
 
 const logger = HapTestLogger.getLogger();
 const EVENT_INTERVAL = 1000;
@@ -36,8 +38,59 @@ const PAGE_CHECK_RETRY_LIMIT = 2;
 const PAGE_CHECK_RETRY_DELAY = 300;
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-type SyncStatus = 'COMPLETED' | 'DIVERGED' | 'UNCERTAIN' | 'COLLECTION_FAILED' | 'ERROR';
+type SyncStatus = 'COMPLETED' | 'DIVERGED' | 'UNCERTAIN' | 'COLLECTION_FAILED' | 'MAPPING_FAILED' | 'ERROR';
 export type SyncDecisionAction = 'CONTINUE' | 'STOP_DIVERGED' | 'STOP_UNCERTAIN';
+
+export interface SyncMappingDiagnostic {
+    status: ComponentMappingStatus;
+    reason: string;
+    evidence: string[];
+    candidateCount: number;
+    mappedPoint?: Point;
+    candidates: Array<{
+        score: number;
+        evidence: string[];
+        scoreBreakdown: ComponentScoreStep[];
+        metadata: ComponentMetadata;
+        type?: string;
+        id?: string;
+        key?: string;
+        text?: string;
+        hint?: string;
+    }>;
+    filteredCandidates: ComponentFilterDiagnostic[];
+    sourceComponent?: ComponentMetadata;
+    targetComponent?: ComponentMetadata;
+    sourceSnapshot?: {
+        capturedAt?: string;
+        deviceId?: string;
+        screenWidth?: number;
+        screenHeight?: number;
+        screenCapPath?: string;
+    };
+    targetSnapshot?: {
+        capturedAt?: string;
+        deviceId?: string;
+        screenWidth?: number;
+        screenHeight?: number;
+        screenCapPath?: string;
+    };
+    targetScreen?: { width: number; height: number };
+    selected?: {
+        type?: string;
+        id?: string;
+        key?: string;
+        text?: string;
+        hint?: string;
+    };
+}
+
+export interface SyncEventExecutionDiagnostic {
+    left: 'SUCCEEDED' | 'FAILED' | 'NOT_STARTED';
+    right: 'SUCCEEDED' | 'FAILED' | 'NOT_STARTED';
+    leftError?: string;
+    rightError?: string;
+}
 
 export interface SyncResult {
     consistent: boolean;
@@ -54,6 +107,8 @@ export interface SyncResult {
     operationPageUnresolvedIssues?: string[];
     leftPageSummary?: OperationPageCheckResult['leftSummary'];
     rightPageSummary?: OperationPageCheckResult['rightSummary'];
+    operationMapping?: SyncMappingDiagnostic;
+    eventExecution?: SyncEventExecutionDiagnostic;
 }
 
 interface SyncDeviceContext {
@@ -77,6 +132,63 @@ export function getSyncDecisionAction(decision: OperationPageDecision): SyncDeci
 
 function cloneEvent(event: Event): Event {
     return EventBuilder.createEventFromJson(JSON.parse(event.toString()));
+}
+
+function mappingDiagnostic(mapping: ComponentMappingResult, sourcePage?: Page, targetPage?: Page, targetScreen?: { width: number; height: number }): SyncMappingDiagnostic {
+    const snapshotDiagnostic = (page?: Page) => {
+        const snapshot = page?.getSnapshot();
+        return snapshot ? {
+            capturedAt: snapshot.capturedAt,
+            deviceId: snapshot.udid,
+            screenWidth: snapshot.screenWidth,
+            screenHeight: snapshot.screenHeight,
+            screenCapPath: snapshot.screenCapPath,
+        } : undefined;
+    };
+    const candidates = mapping.candidates.map((candidate) => ({
+        score: candidate.score,
+        evidence: candidate.evidence,
+        scoreBreakdown: candidate.scoreBreakdown,
+        metadata: candidate.metadata,
+        type: candidate.component.type,
+        id: candidate.component.id,
+        key: candidate.component.key,
+        text: candidate.component.text,
+        hint: candidate.component.hint,
+    }));
+    return {
+        status: mapping.status,
+        reason: mapping.reason,
+        evidence: mapping.evidence,
+        candidateCount: candidates.length,
+        mappedPoint: mapping.mappedPoint,
+        candidates,
+        filteredCandidates: mapping.filteredCandidates ?? [],
+        sourceComponent: mapping.sourceMetadata,
+        targetComponent: mapping.targetMetadata,
+        sourceSnapshot: snapshotDiagnostic(sourcePage),
+        targetSnapshot: snapshotDiagnostic(targetPage),
+        targetScreen,
+        selected: mapping.targetComponent ? {
+            type: mapping.targetComponent.type,
+            id: mapping.targetComponent.id,
+            key: mapping.targetComponent.key,
+            text: mapping.targetComponent.text,
+            hint: mapping.targetComponent.hint,
+        } : undefined,
+    };
+}
+
+function settledStatus(result: PromiseSettledResult<void>): 'SUCCEEDED' | 'FAILED' {
+    return result.status === 'fulfilled' ? 'SUCCEEDED' : 'FAILED';
+}
+
+function settledError(result: PromiseSettledResult<void>): string | undefined {
+    return result.status === 'rejected' ? String(result.reason) : undefined;
+}
+
+function notStartedExecution(): SyncEventExecutionDiagnostic {
+    return { left: 'NOT_STARTED', right: 'NOT_STARTED' };
 }
 
 function createDeviceOptions(baseOptions: any, connectkey: string, outputDir: string): FuzzOptions {
@@ -128,7 +240,14 @@ function saveAndPrintResult(outputDir: string, result: SyncResult): SyncResult {
     return result;
 }
 
-function resultFromCheck(steps: number, check: OperationPageCheckResult, status: SyncStatus, reason: string, firstMismatchStep?: number): SyncResult {
+function resultFromCheck(
+    steps: number,
+    check: OperationPageCheckResult,
+    status: SyncStatus,
+    reason: string,
+    firstMismatchStep?: number,
+    diagnostics: Pick<SyncResult, 'operationMapping' | 'eventExecution'> = {},
+): SyncResult {
     const result: SyncResult = {
         consistent: check.decision === 'SAME_PAGE',
         steps,
@@ -144,6 +263,7 @@ function resultFromCheck(steps: number, check: OperationPageCheckResult, status:
         operationPageUnresolvedIssues: check.unresolvedIssues,
         leftPageSummary: check.leftSummary,
         rightPageSummary: check.rightSummary,
+        ...diagnostics,
     };
     if (firstMismatchStep === undefined) delete result.firstMismatchStep;
     return result;
@@ -262,6 +382,8 @@ export async function runSyncCommand(options: any): Promise<SyncResult> {
     }
 
     const policy: Policy = PolicyBuilder.buildPolicyByName(left.device, left.hap, left.options);
+    let lastMapping: SyncMappingDiagnostic | undefined;
+    let lastExecution: SyncEventExecutionDiagnostic | undefined;
     while (policy.enabled) {
         const event = await policy.generateEvent(currentLeftPage);
         if (event instanceof WaitEvent) {
@@ -271,25 +393,62 @@ export async function runSyncCommand(options: any): Promise<SyncResult> {
         if (event instanceof ExitEvent) break;
 
         const leftEvent = event;
-        const rightEvent = cloneEvent(event);
+        const targetScreen = {
+            width: right.device.getWidth(),
+            height: right.device.getHeight(),
+        };
+        const mapping = mapClickEvent(leftEvent, currentLeftPage, currentRightPage, targetScreen);
+        const currentMapping = mappingDiagnostic(mapping, currentLeftPage, currentRightPage, targetScreen);
+        logger.info(`[sync-event-mapping] step=${steps + 1} status=${mapping.status} reason=${JSON.stringify(mapping.reason)} source=${JSON.stringify(currentMapping.sourceComponent)} target=${JSON.stringify(currentMapping.targetComponent)} screen=${JSON.stringify(targetScreen)} snapshots=${JSON.stringify({ left: currentMapping.sourceSnapshot, right: currentMapping.targetSnapshot })} selected=${JSON.stringify(currentMapping.selected)} point=${JSON.stringify(mapping.mappedPoint)}`);
+        logger.info(`[sync-event-mapping-score] step=${steps + 1} candidates=${JSON.stringify(currentMapping.candidates)}`);
+        logger.debug(`[sync-event-mapping-filtered] step=${steps + 1} filteredCandidates=${JSON.stringify(currentMapping.filteredCandidates)}`);
+        if (mapping.status !== 'MAPPED' && mapping.status !== 'NOT_APPLICABLE') {
+            await Promise.all([stopDevice(left.device), stopDevice(right.device)]);
+            return saveAndPrintResult(
+                outputDir,
+                resultFromCheck(steps, lastCheck, 'MAPPING_FAILED', `Unable to map the synchronized event to the right device: ${mapping.reason}`, undefined, {
+                    operationMapping: currentMapping,
+                    eventExecution: notStartedExecution(),
+                }),
+            );
+        }
+        const rightEvent = mapping.status === 'MAPPED' && mapping.mappedEvent ? mapping.mappedEvent : cloneEvent(event);
         const leftAction = new EventAction(left.device, left.hap, currentLeftPage, leftEvent, left.options.deviceType);
         const rightAction = new EventAction(right.device, right.hap, currentRightPage, rightEvent, right.options.deviceType);
+        let execution = notStartedExecution();
         try {
             const starts = await Promise.allSettled([leftAction.start(), rightAction.start()]);
+            execution = {
+                left: settledStatus(starts[0]),
+                right: settledStatus(starts[1]),
+                leftError: settledError(starts[0]),
+                rightError: settledError(starts[1]),
+            };
             const startFailure = starts.find((item): item is PromiseRejectedResult => item.status === 'rejected');
             if (startFailure) throw startFailure.reason;
             await sleep(EVENT_INTERVAL);
             const stops = await Promise.allSettled([leftAction.stop(), rightAction.stop()]);
+            execution = {
+                left: settledStatus(stops[0]),
+                right: settledStatus(stops[1]),
+                leftError: settledError(stops[0]),
+                rightError: settledError(stops[1]),
+            };
             const stopFailure = stops.find((item): item is PromiseRejectedResult => item.status === 'rejected');
             if (stopFailure) throw stopFailure.reason;
         } catch (error) {
             await Promise.all([stopDevice(left.device), stopDevice(right.device)]);
             const failed = compareSyncPages(leftAction.transition.from, rightAction.transition.from);
             const status: SyncStatus = isCollectionFailure(error) ? 'COLLECTION_FAILED' : 'ERROR';
-            return saveAndPrintResult(outputDir, resultFromCheck(steps, { ...failed, source: 'COLLECTION', decision: 'UNCERTAIN', reason: `Event execution failed: ${String(error)}`, unresolvedIssues: [...failed.unresolvedIssues, String(error)] }, status, `Event execution failed: ${String(error)}`, steps + 1));
+            return saveAndPrintResult(outputDir, resultFromCheck(steps, { ...failed, source: 'COLLECTION', decision: 'UNCERTAIN', reason: `Event execution failed: ${String(error)}`, unresolvedIssues: [...failed.unresolvedIssues, String(error)] }, status, `Event execution failed: ${String(error)}`, undefined, {
+                operationMapping: currentMapping,
+                eventExecution: execution,
+            }));
         }
 
         steps += 1;
+        lastMapping = currentMapping;
+        lastExecution = execution;
         const eventText = leftEvent.toString();
         history.push(eventText);
         if (history.length > 10) history.shift();
@@ -301,11 +460,17 @@ export async function runSyncCommand(options: any): Promise<SyncResult> {
             await Promise.all([stopDevice(left.device), stopDevice(right.device)]);
             const status: SyncStatus = after.check.decision === 'DIFFERENT_PAGE' ? 'DIVERGED' : after.check.source === 'COLLECTION' ? 'COLLECTION_FAILED' : 'UNCERTAIN';
             const reason = after.check.decision === 'DIFFERENT_PAGE' ? 'Pages diverged after synchronized execution.' : 'Operation page could not be determined after synchronized execution.';
-            return saveAndPrintResult(outputDir, resultFromCheck(steps, after.check, status, reason, after.check.decision === 'DIFFERENT_PAGE' ? steps : undefined));
+            return saveAndPrintResult(outputDir, resultFromCheck(steps, after.check, status, reason, after.check.decision === 'DIFFERENT_PAGE' ? steps : undefined, {
+                operationMapping: lastMapping,
+                eventExecution: lastExecution,
+            }));
         }
     }
 
     await Promise.all([stopDevice(left.device), stopDevice(right.device)]);
     const finalCheck = lastCheck;
-    return saveAndPrintResult(outputDir, resultFromCheck(steps, finalCheck, 'COMPLETED', 'Pages stayed on the same logical operation path for all synchronized steps.'));
+    return saveAndPrintResult(outputDir, resultFromCheck(steps, finalCheck, 'COMPLETED', 'Pages stayed on the same logical operation path for all synchronized steps.', undefined, {
+        operationMapping: lastMapping,
+        eventExecution: lastExecution,
+    }));
 }

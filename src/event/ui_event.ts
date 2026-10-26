@@ -41,6 +41,10 @@ export abstract class UIEvent extends Event {
         return this.type;
     }
 
+    getPoint(): Point {
+        return this.point;
+    }
+
     setComponent(component: Component) {
         this.component = component;
     }
