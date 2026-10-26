@@ -225,36 +225,34 @@ async function runSyncDeviceCommand(options: any): Promise<void> {
         });
 
     const hasNamedCommand = process.argv.slice(2).some((argument) => argument === 'multi' || argument === 'sync');
-    const fuzzCommand = program
-        .description('HapTest fuzz runner')
-        .option('-o --output <dir>', 'output dir', 'out')
-        .option('--policy <policyName>', 'policy name', 'manu')
-        .option('-t --target [connectkey]', 'hdc connectkey', undefined)
-        .option('-c --coverage', 'enable coverage', false)
-        .option('--report [report root]', 'report root')
-        .option('--from-current-page', 'start haptest from the simulator current foreground page', false)
-        .option('--deviceType <name>', 'override detected device type for the worker')
-        .option('--debug', 'debug log level', false)
-        .option('--exclude [excludes...]', 'exclude bundle name')
-        .option('--llm', 'start llm policy', false)
-        .option('--simK <number>', '', '8')
-        .option('--staticConfig <file>', 'Path to static configuration file');
-
+    const fuzzCommand = program.description('HapTest fuzz runner');
     if (!hasNamedCommand) {
-        fuzzCommand.option(
-            '-i, --hap <items...>',
-            'HAP bundle name or HAP file path or HAP project source root (can specify multiple)'
-        );
+        fuzzCommand
+            .option('-o, --output <dir>', 'output dir', 'out')
+            .option('--policy <policyName>', 'policy name', 'manu')
+            .option('-t, --target [connectkey]', 'hdc connectkey', undefined)
+            .option('-c, --coverage', 'enable coverage', false)
+            .option('--report [report root]', 'report root')
+            .option('--from-current-page', 'start haptest from the simulator current foreground page', false)
+            .option('--deviceType <name>', 'override detected device type for the worker')
+            .option('--debug', 'debug log level', false)
+            .option('--exclude [excludes...]', 'exclude bundle name')
+            .option('--llm', 'start llm policy', false)
+            .option('--simK <number>', '', '8')
+            .option('--staticConfig <file>', 'Path to static configuration file')
+            .option(
+                '-i, --hap <items...>',
+                'HAP bundle name or HAP file path or HAP project source root (can specify multiple)'
+            )
+            .action(async (cmdOptions) => {
+                try {
+                    await runFuzzCommand(cmdOptions);
+                } catch (err) {
+                    logger.error('haptest fuzz command failed.', err);
+                    process.exit(1);
+                }
+            });
     }
-
-    fuzzCommand.action(async (cmdOptions) => {
-        try {
-            await runFuzzCommand(cmdOptions);
-        } catch (err) {
-            logger.error('haptest fuzz command failed.', err);
-            process.exit(1);
-        }
-    });
 
     program
         .command('multi')
@@ -287,7 +285,7 @@ async function runSyncDeviceCommand(options: any): Promise<void> {
         .requiredOption('-i, --hap <item>', 'single HAP bundle name, HAP file path, or HAP project source root shared by both devices')
         .requiredOption('--left <connectkey>', 'connectkey of the left device')
         .requiredOption('--right <connectkey>', 'connectkey of the right device')
-        .option('-o --output <dir>', 'base output dir', 'out/sync')
+        .option('-o, --output <dir>', 'base output dir', 'out/sync')
         .option('--policy <policyName>', 'policy name', 'manu')
         .option('-c --coverage', 'enable coverage', false)
         .option('--report [report root]', 'report root')

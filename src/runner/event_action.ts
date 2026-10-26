@@ -50,14 +50,11 @@ export class EventAction {
     }
 
     async stop() {
-        this.transition.to = await this.device.getCurrentPage(this.hap);
-        
-        // If this was an AbilityEvent (app launch), ensure the app is in fullscreen mode
         if (this.transition.event instanceof AbilityEvent) {
             logger.info('AbilityEvent detected, checking and ensuring fullscreen mode');
             await this.device.ensureFullscreen(this.hap);
         }
-        
+        this.transition.to = await this.device.getCurrentPage(this.hap, true);
         logger.info(`EventAction->stop`);
         this.save();
     }
@@ -69,7 +66,7 @@ export class EventAction {
                 event: this.transition.event,
                 to: this.transition.to,
                 fromContentSig: this.transition.from.getContentSig(),
-                toContentSig: this.transition.from.getContentSig(),
+                toContentSig: this.transition.to.getContentSig(),
             },
             { groups: ['Content'] }
         );

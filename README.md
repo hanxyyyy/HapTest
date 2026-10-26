@@ -28,7 +28,7 @@ npm install
 
 ## Instructions
 
-### 1. Usage 
+### 1. Usage
 ```
 haptest [options]
 
@@ -57,9 +57,9 @@ Options:
   hdc list targets -v
   ```
 
-### 2. Using DevEco simulator to run HAP  
+### 2. Using DevEco simulator to run HAP
 
-1.  download DevEco: https://developer.huawei.com/consumer/cn/deveco-studio/  
+1.  download DevEco: https://developer.huawei.com/consumer/cn/deveco-studio/
 2.  Refer to the link to run the emulator: https://developer.huawei.com/consumer/cn/doc/harmonyos-guides-V5/ide-run-emulator-0000001582636200-V5
 3.  test HAP photos
 ```
@@ -69,7 +69,7 @@ haptest -i com.huawei.hmos.photos -o out
 ### 3. Build & Test your Hap Build Hap & Instrument coverage
 1. download Command Line Tools: https://developer.huawei.com/consumer/cn/download/
 2. add ${command-line-tools}/bin to PATH
-3. using haptest cmd to build instrument and test your Hap. 
+3. using haptest cmd to build instrument and test your Hap.
 ```
 haptest -i {Hap project root } --policy greedy_dfs -o out
 ```
@@ -116,14 +116,15 @@ haptest -i com.example.demo --policy static_guided --staticConfig config.json --
    ```
 3. Each target runs in its own child process and writes to its own output directory.
 
-### 8. Run two simulators in lockstep and compare consistency
-1. Make sure both simulators are already on the same app and the same page.
+### 8. Run two simulators in lockstep and compare logical operation pages
+1. Make sure both simulators are already on the same target app and page.
 2. Run the sync command with two connectkeys:
   ```
   haptest sync -i com.huawei.hmos.browser --left phone-001 --right pc-001 --from-current-page -o out/sync
   ```
-3. The command executes the same step on both devices, compares page signatures after each step, and writes the final result to `out/sync/sync-result.json`.
-4. If the pages diverge at any step, the command stops both sessions and returns `consistent: false`.
+3. The command checks logical operation-page identity after initialization and after each synchronized step. Device-specific bounds, coordinates, dimensions, and component counts are not used as divergence evidence. Full page signatures remain available for diagnostics in `out/sync/sync-result.json`.
+4. `SAME_PAGE` continues exploration, `DIFFERENT_PAGE` stops with `status: "DIVERGED"`, and `UNCERTAIN` stops with an explicit `status: "UNCERTAIN"` or `"COLLECTION_FAILED"`; uncertainty is never recorded as a confirmed fork.
+5. Optional LLM assistance uses `LLM_ENABLED`, `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL`, `LLM_TIMEOUT_MS`, and `LLM_MAX_RETRIES` from the environment or a local `.env` file. Set optional `LLM_USE_SCREENSHOTS=true` for multimodal models; if image input is rejected, HapTest retries with text-only summaries. See `.env.example`. LLM failures return `UNCERTAIN`.
 
 ## Contribution
 
@@ -131,4 +132,3 @@ haptest -i com.example.demo --policy static_guided --staticConfig config.json --
 2.  Create Feat_xxx branch
 3.  Commit your code
 4.  Create Pull Request
-

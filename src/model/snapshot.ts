@@ -21,6 +21,9 @@ import { Expose } from 'class-transformer';
  * Snapshots of the test site
  */
 export class Snapshot {
+    /** page collection timestamp */
+    @Expose()
+    capturedAt: string;
     /** screen width */
     @Expose()
     screenWidth: number;
@@ -41,6 +44,7 @@ export class Snapshot {
     udid: string;
     
     constructor(device: Device, screen: string, faultLogs: Set<string>, coverage?: CoverageReport) {
+        this.capturedAt = new Date().toISOString();
         this.udid = device.getUdid();
         this.screenWidth = device.getWidth();
         this.screenHeight = device.getHeight();

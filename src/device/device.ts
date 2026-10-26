@@ -41,6 +41,21 @@ import { Gesture } from '../event/gesture';
 import { PageBuilder } from '../model/builder/page_builder';
 const logger = getLogger();
 
+export const TARGET_PAGE_MAX_ATTEMPTS = 5;
+const TARGET_PAGE_RETRY_DELAY_MS = 300;
+
+function pageCandidateDescription(page: Page): string {
+    const root = page.getRoot();
+    return 'bundleName=' + (page.getBundleName() || '<empty>') + ', abilityName=' + (page.getAbilityName() || '<empty>') + ', pagePath=' + (page.getPagePath() || '<empty>') + ', root.type=' + (root.type || '<empty>') + ', root.bounds=' + JSON.stringify(root.bounds ?? []);
+}
+
+export function findTargetPage(pages: Page[], targetBundleName?: string): Page | undefined {
+    if (!targetBundleName) {
+        return undefined;
+    }
+    return pages.find((page) => page.getBundleName() === targetBundleName && !page.isStop() && !page.isBackground());
+}
+
 export class Device implements EventSimulator {
     private hdc: Hdc;
     private coverage?: Coverage;
@@ -209,60 +224,18 @@ export class Device implements EventSimulator {
      * @returns true if already fullscreen or successfully maximized, false otherwise
      */
     async ensureFullscreen(hap: Hap): Promise<boolean> {
+        if (!this.is2in1Device) {
+            return true;
+        }
         try {
-            // Wait for the app to fully stabilize after launch
-            await new Promise((resolve) => setTimeout(resolve, 5000));
-            
-            // Get all pages from dumpViewTree, not just the "current" one
-            // because the app window might not be the largest page yet
-            let layout = await this.driverCtx!.driver.dumpLayout();
-            let pages = PageBuilder.buildPagesFromLayout(layout);
-            
-            // Try to find the page that matches the target bundle name
-            let targetPage: Page | undefined;
-            for (const p of pages) {
-                if (p.getBundleName() === hap.bundleName && !p.isStop() && !p.isBackground()) {
-                    targetPage = p;
-                    break;
-                }
-            }
-            
-            // If not found, use the largest page (similar to dumpViewTree logic)
-            if (!targetPage && pages.length > 0) {
-                pages.sort((a: Page, b: Page) => {
-                    return b.getRoot().getHeight() - a.getRoot().getHeight();
-                });
-                targetPage = pages[0];
-            }
-            
-            if (!targetPage) {
-                logger.warn('No page found for fullscreen check');
-                return false;
-            }
-            
-            let page = targetPage;
-
-            const focusedInput = page.getComponents().find((component) => {
-                return component.focused === true && component.inputable;
-            });
-
+            await new Promise((resolve) => setTimeout(resolve, 500));
+            let page = await this.getCurrentPage(hap, true);
+            const focusedInput = page.getComponents().find((component) => component.focused === true && component.inputable);
             if (focusedInput) {
-                logger.info(
-                    `Focused input detected before fullscreen check, id=${focusedInput.id}, key=${focusedInput.key}, type=${focusedInput.type}. Sending Escape to dismiss focus.`
-                );
-                try {
-                    await this.inputKey(KeyCode.KEYCODE_ESCAPE);
-                    await new Promise((resolve) => setTimeout(resolve, 300));
-                    page = await this.getCurrentPage(hap);
-                } catch (err) {
-                    logger.warn('Failed to dismiss focused input before fullscreen check', err);
-                }
-            }
-            
-            // Check if the app is stopped or in background
-            if (page.isStop() || page.isBackground()) {
-                logger.debug('App is stopped or in background, skipping fullscreen check');
-                return false;
+                logger.info(`Focused input detected before fullscreen check, id=${focusedInput.id}, key=${focusedInput.key}, type=${focusedInput.type}. Sending Escape to dismiss focus.`);
+                await this.inputKey(KeyCode.KEYCODE_ESCAPE);
+                await new Promise((resolve) => setTimeout(resolve, 300));
+                page = await this.getCurrentPage(hap, true);
             }
 
             const root = page.getRoot();
@@ -270,61 +243,38 @@ export class Device implements EventSimulator {
             const windowHeight = root.getHeight();
             const screenWidth = this.getWidth();
             const screenHeight = this.getHeight();
-
-            // Check if window size matches screen size (with small tolerance for rounding)
             const widthMatch = Math.abs(windowWidth - screenWidth) <= 10;
             const heightMatch = Math.abs(windowHeight - screenHeight) <= 100;
-
             if (widthMatch && heightMatch) {
                 logger.debug('Application is already in fullscreen mode');
                 return true;
             }
 
-            logger.info(
-                `Application is not fullscreen. Window: ${windowWidth}x${windowHeight}, Screen: ${screenWidth}x${screenHeight}. Attempting to maximize.`
+            const maximizeBtn = page.getComponents().find((component) =>
+                component.id === 'EnhanceMaximizeBtn' ||
+                component.key === 'EnhanceMaximizeBtn' ||
+                component.id === 'EnhanceCompatibleMaximizeBtn' ||
+                component.key === 'EnhanceCompatibleMaximizeBtn'
             );
-
-            const pageBundleName = page.getBundleName();
-            const components = page.getComponents();
-            logger.debug(
-                `ensureFullscreen: page bundleName=${pageBundleName}, hap bundleName=${hap.bundleName}, component count=${components.length}`
-            );
-
-            const maximizeBtn = components.find((component) => {
-                return component.id === 'EnhanceMaximizeBtn' || component.key === 'EnhanceMaximizeBtn';
-            });
-
             if (!maximizeBtn) {
-                logger.warn(`EnhanceMaximizeBtn not found. Searched ${components.length} components in page with bundleName=${pageBundleName}`);
+                logger.warn(`No supported maximize control found. Searched ${page.getComponents().length} components in target page.`);
                 return false;
             }
 
-            logger.info(
-                `Found EnhanceMaximizeBtn, id=${maximizeBtn.id}, key=${maximizeBtn.key}, bounds=${JSON.stringify(maximizeBtn.bounds)}, clicking to maximize`
-            );
+            logger.info(`Found maximize control id=${maximizeBtn.id}, key=${maximizeBtn.key}; clicking to maximize.`);
             await this.sendEvent(new TouchEvent(maximizeBtn));
-            
-            // Wait for the window to maximize
             await new Promise((resolve) => setTimeout(resolve, 500));
-            
-            // Verify the window is now fullscreen
-            const updatedPage = await this.getCurrentPage(hap);
+            const updatedPage = await this.getCurrentPage(hap, true);
             const updatedRoot = updatedPage.getRoot();
             const newWidth = updatedRoot.getWidth();
             const newHeight = updatedRoot.getHeight();
-            
-            const newWidthMatch = Math.abs(newWidth - screenWidth) <= 2;
-            const newHeightMatch = Math.abs(newHeight - screenHeight) <= 2;
-
-            if (newWidthMatch && newHeightMatch) {
-                logger.info('Successfully maximized application to fullscreen');
-                return true;
-            } else {
-                logger.warn(`Maximize button clicked but window size still not fullscreen. New size: ${newWidth}x${newHeight}`);
-                return false;
+            const maximized = Math.abs(newWidth - screenWidth) <= 10 && Math.abs(newHeight - screenHeight) <= 100;
+            if (!maximized) {
+                logger.warn(`Maximize control was activated but target page is still not fullscreen. New window: ${newWidth}x${newHeight}, Screen: ${screenWidth}x${screenHeight}.`);
             }
+            return maximized;
         } catch (error) {
-            logger.error('Error during fullscreen check/maximize operation', error);
+            logger.warn(`Unable to ensure fullscreen for target bundle ${hap.bundleName}: ${String(error)}`);
             return false;
         }
     }
@@ -445,7 +395,7 @@ export class Device implements EventSimulator {
         const controlButtonIds = ['EnhanceMaximizeBtn', 'EnhanceMinimizeBtn', 'EnhanceCloseBtn'];
         const id = component.id || '';
         const key = component.key || '';
-        
+
         return controlButtonIds.includes(id) || controlButtonIds.includes(key);
     }
 
@@ -619,74 +569,72 @@ export class Device implements EventSimulator {
      * @returns
      */
     async getCurrentPage(hap: Hap, strictForegroundOnly: boolean = false): Promise<Page> {
-        // Get all pages from dumpLayout to find the correct one
-        let layout = await this.driverCtx!.driver.dumpLayout();
-        let pages = PageBuilder.buildPagesFromLayout(layout);
-        
-        // If we have a target bundleName, try to find matching page first
-        let page: Page | undefined;
-        if (hap.bundleName) {
-            for (const p of pages) {
-                if (p.getBundleName() === hap.bundleName && !p.isStop() && !p.isBackground()) {
-                    page = p;
-                    logger.debug(`getCurrentPage: Found matching page with bundleName=${hap.bundleName}`);
+        let pages: Page[] = [];
+        let targetPage: Page | undefined;
+        for (let attempt = 1; attempt <= TARGET_PAGE_MAX_ATTEMPTS; attempt += 1) {
+            try {
+                const layout = await this.driverCtx!.driver.dumpLayout();
+                pages = PageBuilder.buildPagesFromLayout(layout);
+                targetPage = findTargetPage(pages, hap.bundleName);
+                if (targetPage) {
+                    logger.debug(`getCurrentPage: found target bundle=${hap.bundleName} on attempt ${attempt}/${TARGET_PAGE_MAX_ATTEMPTS}`);
                     break;
                 }
+                logger.warn(`getCurrentPage: target bundle=${hap.bundleName || '<unknown>'} not found on attempt ${attempt}/${TARGET_PAGE_MAX_ATTEMPTS}. Candidates: ${pages.map(pageCandidateDescription).join('; ') || 'none'}`);
+            } catch (error) {
+                logger.warn(`getCurrentPage: layout collection failed on attempt ${attempt}/${TARGET_PAGE_MAX_ATTEMPTS}: ${String(error)}`);
+            }
+            if (attempt < TARGET_PAGE_MAX_ATTEMPTS) {
+                await new Promise((resolve) => setTimeout(resolve, TARGET_PAGE_RETRY_DELAY_MS));
             }
         }
-        
-        // If no matching page found, use dumpViewTree logic (sort by height)
-        if (!page) {
-            if (strictForegroundOnly) {
-                throw new Error(
-                    `Unable to find a foreground page for bundle ${hap.bundleName || '<unknown>'}. ` +
-                    'Please bring the target app to foreground before starting haptest.'
-                );
+
+        if (!targetPage && hap.bundleName) {
+            const runningState = this.getHapRunningState(hap);
+            if (strictForegroundOnly || runningState === HapRunningState.FOREGROUND) {
+                const candidates = pages.map(pageCandidateDescription).join('; ') || 'none';
+                throw new Error(`Unable to find target page for bundle ${hap.bundleName || '<unknown>'} after ${TARGET_PAGE_MAX_ATTEMPTS} layout attempts. Candidates: ${candidates}`);
             }
-            pages.sort((a: Page, b: Page) => {
-                return b.getRoot().getHeight() - a.getRoot().getHeight();
-            });
-            if (pages.length > 0) {
-                page = pages[0];
-                const pageBundleName = page.getBundleName();
-                if (!hap.bundleName) {
-                    hap.bundleName = pageBundleName;
-                }
-                logger.debug(`getCurrentPage: Using largest page with bundleName=${pageBundleName}`);
-            }
+            const snapshot = this.getSnapshot(false);
+            const statePage = runningState === HapRunningState.STOP ? STOP_PAGE : BACKGROUND_PAGE;
+            statePage.setSnapshot(snapshot);
+            return statePage;
         }
-        
+
+        if (!hap.bundleName && !targetPage) {
+            pages.sort((left, right) => right.getRoot().getHeight() - left.getRoot().getHeight());
+            targetPage = pages[0];
+        }
+
+        let page = targetPage;
         if (!page) {
-            logger.warn('getCurrentPage: No page found, returning fallback');
+            pages.sort((left, right) => right.getRoot().getHeight() - left.getRoot().getHeight());
+            page = pages[0];
+        }
+        if (!page) {
+            logger.warn('getCurrentPage: no page found, returning fallback');
             return this.createFallbackPage();
         }
-        
+
         const pageBundleName = page.getBundleName();
         if (!hap.bundleName) {
             hap.bundleName = pageBundleName;
         }
-        
         if (this.options.sourceRoot) {
-            let inspector = await this.dumpInspector(hap.bundleName);
+            const inspector = await this.dumpInspector(hap.bundleName);
             page.mergeInspector(inspector.layout);
         }
 
-        // set hap running state
         if (pageBundleName === hap.bundleName) {
-            let snapshot = this.getSnapshot(true);
-            page.setSnapshot(snapshot);
+            page.setSnapshot(this.getSnapshot(true));
             return page;
         }
-
         if (strictForegroundOnly) {
-            throw new Error(
-                `Current foreground page bundle ${pageBundleName} does not match target bundle ${hap.bundleName}. ` +
-                'Please switch to the target app before starting haptest.'
-            );
+            throw new Error(`Current foreground page bundle ${pageBundleName || '<empty>'} does not match target bundle ${hap.bundleName || '<unknown>'}.`);
         }
 
-        let runningState = this.getHapRunningState(hap);
-        let snapshot = this.getSnapshot(false);
+        const runningState = this.getHapRunningState(hap);
+        const snapshot = this.getSnapshot(false);
         if (runningState === HapRunningState.STOP) {
             page = STOP_PAGE;
             page.setSnapshot(snapshot);
@@ -694,7 +642,6 @@ export class Device implements EventSimulator {
             page = BACKGROUND_PAGE;
             page.setSnapshot(snapshot);
         }
-
         return page;
     }
 
@@ -859,7 +806,7 @@ export class Device implements EventSimulator {
         }
         const fileReg = /[\S]*\.(hap|hsp)$/;
         const { maps, rawOutput } = this.hdc.getProcMapsWithRaw(pid, fileReg);
-    
+
         // 保存原始 maps 输出到本地文件
         const mapsFilePath = path.join(localPath, 'proc_maps.txt');
         fs.writeFileSync(mapsFilePath, rawOutput, 'utf-8');
@@ -874,7 +821,7 @@ export class Device implements EventSimulator {
 
         let remote = `/data/local/tmp/${hap.bundleName}_decrypt`;
         this.hdc.mkDir(remote);
-        
+
         // 使用已获取的 maps，避免重复调用 getProcMaps
         this.hdc.memdump(pid, remote, fileReg, maps);
         this.hdc.recvFile(remote, `${localPath}/decrypt`);
